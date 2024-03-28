@@ -2,6 +2,8 @@
 
 This project consists of a Python script that uses Boto3 to interact with AWS Organizations. It fetches a list of all AWS accounts under the organization, including details such as account name, ID, organizational unit (OU) paths, email, status, and join method. The results are output to a CSV file.
 
+<img width="921" alt="スクリーンショット 2024-03-28 18 13 25" src="https://github.com/hoominkani/aws-accounts-to-csv/assets/35726568/2c6b08f8-6d4b-4b74-ab7f-13a8da2334db">
+
 ## Getting Started
 
 These instructions will guide you through setting up and running the project on your local machine using Docker and Docker Compose.
