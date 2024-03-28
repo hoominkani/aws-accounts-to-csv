@@ -10,14 +10,6 @@ These instructions will guide you through setting up and running the project on 
 
 - Docker
 - Docker Compose
-- AWS CLI (optional, for configuring AWS credentials)
-
-### AWS Credentials
-
-Before running the script, you must have your AWS credentials configured. This can be done in several ways:
-
-1. **AWS CLI:** If you have the AWS CLI installed, configure your credentials using `aws configure`.
-2. **Environment Variables:** Set your AWS credentials as environment variables in the `docker-compose.yml` file.
 
 ### Configuring the Project
 
@@ -34,7 +26,6 @@ export AWS_DEFAULT_REGION=$YOUR_AWS_DEFAULT_REGION
 ### How to output csv
 
 ```
-# 
 docker-compose up
 ```
 
