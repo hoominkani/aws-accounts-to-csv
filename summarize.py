@@ -5,6 +5,7 @@ from operator import itemgetter
 from typing import Dict, List, Tuple
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from tabulate import tabulate
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -66,203 +67,143 @@ class IdentityCenterInventory:
         self.permission_sets = []
         self.permission_set_arn_to_name = {}
 
+    def fetch_paged_data(self, client, method: str, **kwargs) -> List[Dict]:
+        """
+        Fetches paginated data for a given client method.
+
+        Args:
+            client: Boto3 client.
+            method (str): Method name to call on the client.
+            kwargs: Additional arguments for the method.
+
+        Returns:
+            List[Dict]: A list of combined paginated results.
+        """
+        try:
+            paginator = client.get_paginator(method)
+            data = []
+            for page in paginator.paginate(**kwargs):
+                data.extend(page[next(iter(page))])
+            return data
+        except (BotoCoreError, ClientError) as e:
+            logging.error(f"Error fetching paginated data: {e}")
+            return []
+
     def fetch_accounts(self) -> None:
-        """
-        Fetches AWS accounts from AWS Organizations.
-        """
+        """Fetch AWS accounts from AWS Organizations."""
         logging.info('Fetching AWS accounts...')
-        paginator = self.org_client.get_paginator('list_accounts')
-        for page in paginator.paginate():
-            self.accounts.extend(page['Accounts'])
-        self.account_id_to_name = {account['Id']: account['Name'] for account in self.accounts}
+        accounts = self.fetch_paged_data(self.org_client, 'list_accounts')
+        self.account_id_to_name = {account['Id']: account['Name'] for account in accounts}
         logging.info(f'Number of accounts: {len(self.account_id_to_name)}')
 
     def fetch_users(self, identity_store_id: str) -> None:
-        """
-        Fetches users from the specified Identity Store.
-
-        Args:
-            identity_store_id (str): The ID of the Identity Store.
-        """
+        """Fetch users from the Identity Store."""
         logging.info('Fetching users...')
-        paginator = self.idstore_client.get_paginator('list_users')
-        for page in paginator.paginate(IdentityStoreId=identity_store_id):
-            self.users.extend(page['Users'])
-        self.user_id_to_name = {user['UserId']: user['DisplayName'] for user in self.users}
+        users = self.fetch_paged_data(self.idstore_client, 'list_users', IdentityStoreId=identity_store_id)
+        self.user_id_to_name = {user['UserId']: user['DisplayName'] for user in users}
         logging.info(f'Number of users: {len(self.user_id_to_name)}')
 
     def fetch_groups(self, identity_store_id: str) -> None:
-        """
-        Fetches groups from the specified Identity Store.
-
-        Args:
-            identity_store_id (str): The ID of the Identity Store.
-        """
+        """Fetch groups from the Identity Store."""
         logging.info('Fetching groups...')
-        paginator = self.idstore_client.get_paginator('list_groups')
-        for page in paginator.paginate(IdentityStoreId=identity_store_id):
-            self.groups.extend(page['Groups'])
-        self.group_id_to_name = {group['GroupId']: group['DisplayName'] for group in self.groups}
+        groups = self.fetch_paged_data(self.idstore_client, 'list_groups', IdentityStoreId=identity_store_id)
+        self.group_id_to_name = {group['GroupId']: group['DisplayName'] for group in groups}
         logging.info(f'Number of groups: {len(self.group_id_to_name)}')
 
     def fetch_permission_sets(self, instance_arn: str) -> None:
-        """
-        Fetches permission sets from the specified IAM Identity Center instance.
-
-        Args:
-            instance_arn (str): The ARN of the IAM Identity Center instance.
-        """
+        """Fetch permission sets from the IAM Identity Center instance."""
         logging.info('Fetching permission sets...')
-        paginator = self.ssoadmin_client.get_paginator('list_permission_sets')
-        permission_set_arns = []
-        for page in paginator.paginate(InstanceArn=instance_arn):
-            permission_set_arns.extend(page['PermissionSets'])
-
+        permission_set_arns = self.fetch_paged_data(self.ssoadmin_client, 'list_permission_sets', InstanceArn=instance_arn)
         for arn in permission_set_arns:
-            permission_set = self.ssoadmin_client.describe_permission_set(
-                InstanceArn=instance_arn, PermissionSetArn=arn
-            )['PermissionSet']
-            self.permission_sets.append(permission_set)
-            self.permission_set_arn_to_name[arn] = permission_set['Name']
-
+            try:
+                permission_set = self.ssoadmin_client.describe_permission_set(
+                    InstanceArn=instance_arn, PermissionSetArn=arn
+                )['PermissionSet']
+                self.permission_sets.append(permission_set)
+                self.permission_set_arn_to_name[arn] = permission_set['Name']
+            except (BotoCoreError, ClientError) as e:
+                logging.error(f"Error fetching permission set details for {arn}: {e}")
         logging.info(f'Number of permission sets: {len(self.permission_set_arn_to_name)}')
 
     def fetch_group_memberships(self, identity_store_id: str) -> List[Tuple[str, str]]:
-        """
-        Fetches group memberships from the specified Identity Store.
-
-        Args:
-            identity_store_id (str): The ID of the Identity Store.
-
-        Returns:
-            List[Tuple[str, str]]: A list of tuples (group_name, user_name) representing group memberships.
-        """
+        """Fetch group memberships from the Identity Store."""
         logging.info('Fetching group memberships...')
         memberships = []
         for group_id, group_name in self.group_id_to_name.items():
-            paginator = self.idstore_client.get_paginator('list_group_memberships')
-            for page in paginator.paginate(IdentityStoreId=identity_store_id, GroupId=group_id):
-                for membership in page['GroupMemberships']:
-                    user_id = membership['MemberId']['UserId']
-                    user_name = self.user_id_to_name.get(user_id, f'#DELETED({user_id})')
-                    memberships.append((group_name, user_name))
+            group_memberships = self.fetch_paged_data(
+                self.idstore_client, 'list_group_memberships',
+                IdentityStoreId=identity_store_id, GroupId=group_id
+            )
+            for membership in group_memberships:
+                user_id = membership['MemberId']['UserId']
+                user_name = self.user_id_to_name.get(user_id, f'#DELETED({user_id})')
+                memberships.append((group_name, user_name))
         logging.info(f'Number of group memberships: {len(memberships)}')
         return memberships
 
     def fetch_assignments(self, instance_arn: str) -> List[Tuple[str, str, str, str]]:
-        """
-        Fetches account assignments for the specified IAM Identity Center instance.
-
-        Args:
-            instance_arn (str): The ARN of the IAM Identity Center instance.
-
-        Returns:
-            List[Tuple[str, str, str, str]]: A list of tuples (account_name, principal_type, principal_name, permission_set_name) representing assignments.
-        """
+        """Fetch account assignments."""
         logging.info('Fetching account assignments...')
         assignments = []
         for account_id, permission_set_arn in product(self.account_id_to_name.keys(), self.permission_set_arn_to_name.keys()):
             account_name = self.account_id_to_name[account_id]
             permission_set_name = self.permission_set_arn_to_name[permission_set_arn]
             logging.info(f'Fetching assignments for {account_name}, {permission_set_name}...')
-            paginator = self.ssoadmin_client.get_paginator('list_account_assignments')
-            for page in paginator.paginate(InstanceArn=instance_arn, AccountId=account_id, PermissionSetArn=permission_set_arn):
-                for assignment in page['AccountAssignments']:
-                    principal_type = assignment['PrincipalType']
-                    principal_id = assignment['PrincipalId']
-                    if principal_type == 'USER':
-                        principal_name = self.user_id_to_name.get(principal_id, f'#DELETED({principal_id})')
-                    elif principal_type == 'GROUP':
-                        principal_name = self.group_id_to_name.get(principal_id, f'#DELETED({principal_id})')
-                    else:
-                        principal_name = f'#UNKNOWN({principal_id})'
-                    assignments.append((account_name, principal_type, principal_name, permission_set_name))
+            assignments_data = self.fetch_paged_data(
+                self.ssoadmin_client, 'list_account_assignments',
+                InstanceArn=instance_arn, AccountId=account_id, PermissionSetArn=permission_set_arn
+            )
+            for assignment in assignments_data:
+                principal_type = assignment['PrincipalType']
+                principal_id = assignment['PrincipalId']
+                principal_name = (
+                    self.user_id_to_name.get(principal_id, f'#DELETED({principal_id})')
+                    if principal_type == 'USER' else
+                    self.group_id_to_name.get(principal_id, f'#DELETED({principal_id})')
+                )
+                assignments.append((account_name, principal_type, principal_name, permission_set_name))
         logging.info(f'Number of assignments: {len(assignments)}')
         return assignments
 
     def generate_report(self) -> None:
-        """
-        Generates the inventory report and saves it to a file.
-        """
+        """Generate the inventory report and save it to a file."""
         now = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         logging.info('Generating inventory report...')
-
-        # Fetch account information
         self.fetch_accounts()
         exec_account_id = self.sts_client.get_caller_identity()['Account']
         exec_account_name = self.account_id_to_name.get(exec_account_id, 'Unknown')
-
-        # Fetch IAM Identity Center instance information
         instances = self.ssoadmin_client.list_instances()['Instances']
         if not instances:
             logging.error('No IAM Identity Center instance found.')
             return
         instance_arn = instances[0]['InstanceArn']
         identity_store_id = instances[0]['IdentityStoreId']
-
-        # Fetch users and groups
         self.fetch_users(identity_store_id)
         self.fetch_groups(identity_store_id)
-
-        # Fetch permission sets
         self.fetch_permission_sets(instance_arn)
-
-        # Fetch group memberships and assignments
         group_memberships = self.fetch_group_memberships(identity_store_id)
         assignments = self.fetch_assignments(instance_arn)
-
-        # Generate tabulated data
-        accounts_table = tabulate(
-            sorted([(name, account_id) for account_id, name in self.account_id_to_name.items()], key=itemgetter(0)),
-            headers=['Account Name', 'Account ID'],
-            tablefmt='github'
-        )
-        users_table = tabulate(
-            sorted([(display_name, user_name, user_id) for user_id, display_name in self.user_id_to_name.items() for user_name, user_id in [(None, user_id)]], key=itemgetter(0, 1)),
-            headers=['Display Name', 'User Name', 'User ID'],
-            tablefmt='github'
-        )
-        groups_table = tabulate(
-            sorted([(display_name, description, group_id) for group_id, display_name in self.group_id_to_name.items() for description, group_id in [(None, group_id)]], key=itemgetter(0)),
-            headers=['Display Name', 'Description', 'Group ID'],
-            tablefmt='github'
-        )
-        group_memberships_table = tabulate(
-            sorted(group_memberships, key=itemgetter(0, 1)),
-            headers=['Group Name', 'User Name'],
-            tablefmt='github'
-        )
-        permission_sets_table = tabulate(
-            sorted([(name, description, arn) for arn, name in self.permission_set_arn_to_name.items() for description, arn in [(None, arn)]], key=itemgetter(0)),
-            headers=['Permission Set Name', 'Description', 'Permission Set ARN'],
-            tablefmt='github'
-        )
-        assignments_table = tabulate(
-            sorted(assignments, key=itemgetter(0, 1, 2)),
-            headers=['Account Name', 'Principal Type', 'Principal Name', 'Permission Set Name'],
-            tablefmt='github'
-        )
-
-        # Generate report
         report = TEMPLATE.format(
             datetime=now,
             instance_arn=instance_arn,
             identity_store_id=identity_store_id,
             account_name=exec_account_name,
             account_id=exec_account_id,
-            accounts=accounts_table,
-            users=users_table,
-            groups=groups_table,
-            group_memberships=group_memberships_table,
-            permission_sets=permission_sets_table,
-            assignments=assignments_table
+            accounts=self.create_table(self.account_id_to_name.items(), ['Account Name', 'Account ID']),
+            users=self.create_table(self.user_id_to_name.items(), ['User Name', 'User ID']),
+            groups=self.create_table(self.group_id_to_name.items(), ['Group Name', 'Group ID']),
+            group_memberships=self.create_table(group_memberships, ['Group Name', 'User Name']),
+            permission_sets=self.create_table(self.permission_set_arn_to_name.items(), ['Permission Set Name', 'Permission Set ARN']),
+            assignments=self.create_table(assignments, ['Account Name', 'Principal Type', 'Principal Name', 'Permission Set Name'])
         )
-
-        # Save report to file
         file_path = f'output/inventory_{now}.md'
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(report)
         logging.info(f'Inventory report saved to {file_path}')
+
+    def create_table(self, data, headers):
+        """Create a table from data."""
+        return tabulate(data, headers=headers, tablefmt='github')
 
 
 def main():
